@@ -393,16 +393,43 @@ __global__ void sol_exact_pair128_kernel(
         const int64_t k0 = static_cast<int64_t>(kblock) * BK;
 
         // All 256 threads cooperate on one K/V/KSB stage.
-        for (int idx = tid; idx < BK * (HD / 8); idx += kPairThreads) {
-            const int p = idx / (HD / 8), c8 = (idx % (HD / 8)) * 8;
-            *reinterpret_cast<uint2*>(sK + p * kStrideK + c8) =
-                *reinterpret_cast<const uint2*>(ki + kd_base + (k0 + p) * HD + c8);
+        // One 32-byte K chunk per thread: two 16-byte global loads, split into
+        // 8-byte LDS stores to preserve the padded gfx12 LDS row layout.
+        for (int idx = tid; idx < BK * (HD / 32); idx += kPairThreads) {
+            const int p = idx / (HD / 32), part = (idx % (HD / 32)) * 32;
+            const int8_t* src = ki + kd_base + (k0 + p) * HD + part;
+            int8_t* dst = sK + p * kStrideK + part;
+
+            const uint4 a = *reinterpret_cast<const uint4*>(src);
+            uint2 a0; a0.x = a.x; a0.y = a.y;
+            uint2 a1; a1.x = a.z; a1.y = a.w;
+            *reinterpret_cast<uint2*>(dst + 0) = a0;
+            *reinterpret_cast<uint2*>(dst + 8) = a1;
+
+            const uint4 b = *reinterpret_cast<const uint4*>(src + 16);
+            uint2 b0; b0.x = b.x; b0.y = b.y;
+            uint2 b1; b1.x = b.z; b1.y = b.w;
+            *reinterpret_cast<uint2*>(dst + 16) = b0;
+            *reinterpret_cast<uint2*>(dst + 24) = b1;
         }
-        for (int idx = tid; idx < HD * (BK / 8); idx += kPairThreads) {
-            const int c = idx / (BK / 8), part = (idx % (BK / 8)) * 8;
-            *reinterpret_cast<uint2*>(sVt + c * kStrideV + part) =
-                *reinterpret_cast<const uint2*>(
-                    vT + vT_base + static_cast<int64_t>(c) * Tp + k0 + part);
+        // Same 32-byte/thread staging for V^T.
+        for (int idx = tid; idx < HD * (BK / 32); idx += kPairThreads) {
+            const int c = idx / (BK / 32), part = (idx % (BK / 32)) * 32;
+            const int8_t* src =
+                vT + vT_base + static_cast<int64_t>(c) * Tp + k0 + part;
+            int8_t* dst = sVt + c * kStrideV + part;
+
+            const uint4 a = *reinterpret_cast<const uint4*>(src);
+            uint2 a0; a0.x = a.x; a0.y = a.y;
+            uint2 a1; a1.x = a.z; a1.y = a.w;
+            *reinterpret_cast<uint2*>(dst + 0) = a0;
+            *reinterpret_cast<uint2*>(dst + 8) = a1;
+
+            const uint4 b = *reinterpret_cast<const uint4*>(src + 16);
+            uint2 b0; b0.x = b.x; b0.y = b.y;
+            uint2 b1; b1.x = b.z; b1.y = b.w;
+            *reinterpret_cast<uint2*>(dst + 16) = b0;
+            *reinterpret_cast<uint2*>(dst + 24) = b1;
         }
         for (int idx = tid; idx < BK; idx += kPairThreads)
             sKsb[idx] = ksb[kp_base + k0 + idx];
